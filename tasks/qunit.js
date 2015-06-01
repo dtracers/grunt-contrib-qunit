@@ -16,6 +16,8 @@ module.exports = function(grunt) {
 
   // External lib.
   var phantomjs = require('grunt-lib-phantomjs').init(grunt);
+  var selenium = require('selenium-standalone');
+  var webdriverio = require('webdriverio');
 
   // Keep track of the last-started module, test and status.
   var options, currentModule, currentTest, status;
@@ -58,93 +60,106 @@ module.exports = function(grunt) {
     }
   };
 
-  // QUnit hooks.
-  phantomjs.on('qunit.moduleStart', function(name) {
-    unfinished[name] = true;
-    currentModule = name;
-  });
-
-  phantomjs.on('qunit.moduleDone', function(name/*, failed, passed, total*/) {
-    delete unfinished[name];
-  });
-
-  phantomjs.on('qunit.log', function(result, actual, expected, message, source) {
-    if (!result) {
-      failedAssertions.push({
-        actual: actual, expected: expected, message: message, source: source,
-        testName: currentTest
-      });
+  /**
+   * Exits the headless browser.
+   */
+  function exit(client) {
+    if (options.driver === 'phantomjs') {
+      client.halt();
+    } else if (options.driver === 'webdriverio') {
+      client.end();
     }
-  });
+  }
 
-  phantomjs.on('qunit.testStart', function(name) {
-    currentTest = (currentModule ? currentModule + ' - ' : '') + name;
-    grunt.verbose.write(currentTest + '...');
-  });
+  function loadHooks(client) {
+    // QUnit hooks.
+    client.on('qunit.moduleStart', function(name) {
+      unfinished[name] = true;
+      currentModule = name;
+    });
 
-  phantomjs.on('qunit.testDone', function(name, failed/*, passed, total*/) {
-    // Log errors if necessary, otherwise success.
-    if (failed > 0) {
-      // list assertions
-      if (grunt.option('verbose')) {
-        grunt.log.error();
-        logFailedAssertions();
-      } else {
-        grunt.log.write('F'.red);
+    client.on('qunit.moduleDone', function(name/*, failed, passed, total*/) {
+      delete unfinished[name];
+    });
+
+    client.on('qunit.log', function(result, actual, expected, message, source) {
+      if (!result) {
+        failedAssertions.push({
+          actual: actual, expected: expected, message: message, source: source,
+          testName: currentTest
+        });
       }
-    } else {
-      grunt.verbose.ok().or.write('.');
-    }
-  });
+    });
 
-  phantomjs.on('qunit.done', function(failed, passed, total, duration) {
-    phantomjs.halt();
-    status.failed += failed;
-    status.passed += passed;
-    status.total += total;
-    status.duration += duration;
-    // Print assertion errors here, if verbose mode is disabled.
-    if (!grunt.option('verbose')) {
+    client.on('qunit.testStart', function(name) {
+      currentTest = (currentModule ? currentModule + ' - ' : '') + name;
+      grunt.verbose.write(currentTest + '...');
+    });
+
+    client.on('qunit.testDone', function(name, failed/*, passed, total*/) {
+      // Log errors if necessary, otherwise success.
       if (failed > 0) {
-        grunt.log.writeln();
-        logFailedAssertions();
-      } else if (total === 0) {
-        warnUnlessForced('0/0 assertions ran (' + duration + 'ms)');
+        // list assertions
+        if (grunt.option('verbose')) {
+          grunt.log.error();
+          logFailedAssertions();
+        } else {
+          grunt.log.write('F'.red);
+        }
       } else {
-        grunt.log.ok();
+        grunt.verbose.ok().or.write('.');
       }
-    }
-  });
+    });
 
-  // Re-broadcast qunit events on grunt.event.
-  phantomjs.on('qunit.*', function() {
-    var args = [this.event].concat(grunt.util.toArray(arguments));
-    grunt.event.emit.apply(grunt.event, args);
-  });
+    client.on('qunit.done', function(failed, passed, total, duration) {
+      exit(client);
+      status.failed += failed;
+      status.passed += passed;
+      status.total += total;
+      status.duration += duration;
+      // Print assertion errors here, if verbose mode is disabled.
+      if (!grunt.option('verbose')) {
+        if (failed > 0) {
+          grunt.log.writeln();
+          logFailedAssertions();
+        } else if (total === 0) {
+          warnUnlessForced('0/0 assertions ran (' + duration + 'ms)');
+        } else {
+          grunt.log.ok();
+        }
+      }
+    });
 
-  // Built-in error handlers.
-  phantomjs.on('fail.load', function(url) {
-    phantomjs.halt();
-    grunt.verbose.write('...');
-    grunt.event.emit('qunit.fail.load', url);
-    grunt.log.error('PhantomJS unable to load "' + url + '" URI.');
-    status.failed += 1;
-    status.total += 1;
-  });
+    // Re-broadcast qunit events on grunt.event.
+    client.on('qunit.*', function() {
+      var args = [this.event].concat(grunt.util.toArray(arguments));
+      grunt.event.emit.apply(grunt.event, args);
+    });
 
-  phantomjs.on('fail.timeout', function() {
-    phantomjs.halt();
-    grunt.log.writeln();
-    grunt.event.emit('qunit.fail.timeout');
-    grunt.log.error('PhantomJS timed out, possibly due to a missing QUnit start() call.');
-    status.failed += 1;
-    status.total += 1;
-  });
+    // Built-in error handlers.
+    client.on('fail.load', function(url) {
+      exit(client);
+      grunt.verbose.write('...');
+      grunt.event.emit('qunit.fail.load', url);
+      grunt.log.error('PhantomJS unable to load "' + url + '" URI.');
+      status.failed += 1;
+      status.total += 1;
+    });
 
-  phantomjs.on('error.onError', function (msg, stackTrace) {
-    grunt.event.emit('qunit.error.onError', msg, stackTrace);
-    grunt.log.warn('PhantomJS error:\n', msg, '\n', stackTrace);
-  });
+    client.on('fail.timeout', function() {
+      exit(client);
+      grunt.log.writeln();
+      grunt.event.emit('qunit.fail.timeout');
+      grunt.log.error('PhantomJS timed out, possibly due to a missing QUnit start() call.');
+      status.failed += 1;
+      status.total += 1;
+    });
+
+    client.on('error.onError', function (msg, stackTrace) {
+      grunt.event.emit('qunit.error.onError', msg, stackTrace);
+      grunt.log.warn('PhantomJS error:\n', msg, '\n', stackTrace);
+    });
+  }
 
   grunt.registerMultiTask('qunit', 'Run QUnit unit tests in a headless PhantomJS instance.', function() {
     // Merge task-specific and/or target-specific options with these defaults.
@@ -159,7 +174,9 @@ module.exports = function(grunt) {
       // Connect phantomjs console output to grunt output
       console: true,
       // Do not use an HTTP base by default
-      httpBase: false
+      httpBase: false,
+
+      driver: 'phantomjs'
     });
 
     var urls;
@@ -187,6 +204,21 @@ module.exports = function(grunt) {
       });
     }
 
+    var client;
+    if (options.driver === 'phantomjs') {
+      client = phantomjs;
+    } else if (options.driver === 'webdriverio') {
+      client = webdriverio;
+    }
+
+    console.log('Driver that was loaded', client);
+
+    if (options.driver === 'webdriverio') {
+      selenium.start();
+    }
+
+    loadHooks(client);
+
     // This task is asynchronous.
     var done = this.async();
 
@@ -194,8 +226,8 @@ module.exports = function(grunt) {
     status = {failed: 0, passed: 0, total: 0, duration: 0};
 
     // Pass-through console.log statements.
-    if(options.console) {
-      phantomjs.on('console', console.log.bind(console));
+    if (options.console) {
+      client.on('console', console.log.bind(console));
     }
 
     // Process each filepath in-order.
@@ -207,20 +239,39 @@ module.exports = function(grunt) {
 
       // Launch PhantomJS.
       grunt.event.emit('qunit.spawn', url);
-      phantomjs.spawn(url, {
-        // Additional PhantomJS options.
-        options: options,
-        // Do stuff when done.
-        done: function(err) {
-          if (err) {
-            // If there was an error, abort the series.
-            done();
-          } else {
-            // Otherwise, process next url.
-            next();
-          }
-        },
-      });
+      if (options.driver === 'phantomjs') {
+        phantomjs.spawn(url, {
+          // Additional PhantomJS options.
+          options: options,
+          // Do stuff when done.
+          done: function(err) {
+            if (err) {
+              // If there was an error, abort the series.
+              done();
+            } else {
+              // Otherwise, process next url.
+              next();
+            }
+          },
+        });
+      } else if (options.driver === 'webdriverio') {
+        webdriverio
+          .remote(options)
+          .init()
+          .url(url)
+          .title(function(err, res) {
+              console.log('Title was: ' + res.value);
+          })
+          .end(function(err) {
+            if (err) {
+              // If there was an error, abort the series.
+              done();
+            } else {
+              // Otherwise, process next url.
+              next();
+            }
+          });
+      }
     },
     // All tests have been run.
     function() {

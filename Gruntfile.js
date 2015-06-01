@@ -35,6 +35,9 @@ module.exports = function(grunt) {
     // Unit tests.
     qunit: {
       all_tests: ['test/*{1,2}.html'],
+      options: {
+        driver: 'phantomjs'
+      },
       individual_tests: {
         files: [
           {src: 'test/*{1,2}.html'}
