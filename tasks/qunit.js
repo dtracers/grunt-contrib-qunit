@@ -18,6 +18,7 @@ module.exports = function(grunt) {
   var phantomjs = require('grunt-lib-phantomjs').init(grunt);
   var selenium = require('selenium-standalone');
   var webdriverio = require('webdriverio');
+  var browserevent = require('browserevent');
 
   // Keep track of the last-started module, test and status.
   var options, currentModule, currentTest, status;
@@ -63,7 +64,7 @@ module.exports = function(grunt) {
   /**
    * Exits the headless browser.
    */
-  function exit(client) {
+  function exit(client, options) {
     if (options.driver === 'phantomjs') {
       client.halt();
     } else if (options.driver === 'webdriverio') {
@@ -71,18 +72,31 @@ module.exports = function(grunt) {
     }
   }
 
-  function loadHooks(client) {
+  function loadHooks(client, options) {
+    var on;
+    if (options.driver === 'phantomjs') {
+      on = client.on.bind(client);
+    } else if (options.driver === 'webdriverio') {
+      // by passing the client object as argument the module enhances it with
+      // the `addEventListener` and `removeEventListener` command
+      browserevent.init(client);
+      on = function(eventName, func) {
+        client.addEventListener(eventName, '#qunit', func);
+      };
+    }
     // QUnit hooks.
-    client.on('qunit.moduleStart', function(name) {
+    on('qunit.moduleStart', function(name) {
       unfinished[name] = true;
       currentModule = name;
     });
 
-    client.on('qunit.moduleDone', function(name/*, failed, passed, total*/) {
+    console.log('first hook loaded');
+
+    on('qunit.moduleDone', function(name/*, failed, passed, total*/) {
       delete unfinished[name];
     });
 
-    client.on('qunit.log', function(result, actual, expected, message, source) {
+    on('qunit.log', function(result, actual, expected, message, source) {
       if (!result) {
         failedAssertions.push({
           actual: actual, expected: expected, message: message, source: source,
@@ -91,12 +105,12 @@ module.exports = function(grunt) {
       }
     });
 
-    client.on('qunit.testStart', function(name) {
+    on('qunit.testStart', function(name) {
       currentTest = (currentModule ? currentModule + ' - ' : '') + name;
       grunt.verbose.write(currentTest + '...');
     });
 
-    client.on('qunit.testDone', function(name, failed/*, passed, total*/) {
+    on('qunit.testDone', function(name, failed/*, passed, total*/) {
       // Log errors if necessary, otherwise success.
       if (failed > 0) {
         // list assertions
@@ -111,8 +125,10 @@ module.exports = function(grunt) {
       }
     });
 
-    client.on('qunit.done', function(failed, passed, total, duration) {
-      exit(client);
+    on('done', function(failed, passed, total, duration) {
+      console.log('i think this worked?');
+      grunt.log.error('HEY I FINISHED!');
+      exit(client, options);
       status.failed += failed;
       status.passed += passed;
       status.total += total;
@@ -131,14 +147,14 @@ module.exports = function(grunt) {
     });
 
     // Re-broadcast qunit events on grunt.event.
-    client.on('qunit.*', function() {
+   on('qunit.*', function() {
       var args = [this.event].concat(grunt.util.toArray(arguments));
       grunt.event.emit.apply(grunt.event, args);
     });
 
     // Built-in error handlers.
-    client.on('fail.load', function(url) {
-      exit(client);
+    on('fail.load', function(url) {
+      exit(client, options);
       grunt.verbose.write('...');
       grunt.event.emit('qunit.fail.load', url);
       grunt.log.error('PhantomJS unable to load "' + url + '" URI.');
@@ -146,8 +162,8 @@ module.exports = function(grunt) {
       status.total += 1;
     });
 
-    client.on('fail.timeout', function() {
-      exit(client);
+    on('fail.timeout', function() {
+      exit(client, options);
       grunt.log.writeln();
       grunt.event.emit('qunit.fail.timeout');
       grunt.log.error('PhantomJS timed out, possibly due to a missing QUnit start() call.');
@@ -155,10 +171,15 @@ module.exports = function(grunt) {
       status.total += 1;
     });
 
-    client.on('error.onError', function (msg, stackTrace) {
+    on('error.onError', function (msg, stackTrace) {
       grunt.event.emit('qunit.error.onError', msg, stackTrace);
       grunt.log.warn('PhantomJS error:\n', msg, '\n', stackTrace);
     });
+
+    // Pass-through console.log statements.
+    if (options.console) {
+      on('console', console.log.bind(console));
+    }
   }
 
   grunt.registerMultiTask('qunit', 'Run QUnit unit tests in a headless PhantomJS instance.', function() {
@@ -207,28 +228,22 @@ module.exports = function(grunt) {
     var client;
     if (options.driver === 'phantomjs') {
       client = phantomjs;
+      loadHooks(client, options);
     } else if (options.driver === 'webdriverio') {
-      client = webdriverio;
+      // deferred till the creation of each individual item.
     }
 
     console.log('Driver that was loaded', client);
 
-    if (options.driver === 'webdriverio') {
+    if (options.driver === 'webdriverio2') {
       selenium.start();
     }
-
-    loadHooks(client);
 
     // This task is asynchronous.
     var done = this.async();
 
     // Reset status.
     status = {failed: 0, passed: 0, total: 0, duration: 0};
-
-    // Pass-through console.log statements.
-    if (options.console) {
-      client.on('console', console.log.bind(console));
-    }
 
     // Process each filepath in-order.
     grunt.util.async.forEachSeries(urls, function(url, next) {
@@ -255,13 +270,26 @@ module.exports = function(grunt) {
           },
         });
       } else if (options.driver === 'webdriverio') {
-        webdriverio
-          .remote(options)
-          .init()
-          .url(url)
-          .title(function(err, res) {
+        client = webdriverio.remote(options).init();
+        client.url(url);
+        loadHooks(client, options);
+        console.log('hooks loaded');
+        client.pause(3000).execute(function() {
+          /* jshint ignore:start */
+          QUnit.done(function(event) {
+            var customEvent = new CustomEvent('done', event);
+            // Dispatch the event.
+            var element = document.body.querySelector('#qunit');
+            element.dispatchEvent(customEvent);
+          });
+
+          QUnit.start();
+          /* jshint ignore:end */
+        });
+        client.title(function(err, res) {
               console.log('Title was: ' + res.value);
-          })
+          });
+          /*
           .end(function(err) {
             if (err) {
               // If there was an error, abort the series.
@@ -271,6 +299,7 @@ module.exports = function(grunt) {
               next();
             }
           });
+          */
       }
     },
     // All tests have been run.

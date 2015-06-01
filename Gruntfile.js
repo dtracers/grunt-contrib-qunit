@@ -36,7 +36,12 @@ module.exports = function(grunt) {
     qunit: {
       all_tests: ['test/*{1,2}.html'],
       options: {
-        driver: 'phantomjs'
+        driver: 'webdriverio',
+        desiredCapabilities: {
+          browserName: 'chrome'
+        },
+        httpBase: 'http://localhost:9000',
+
       },
       individual_tests: {
         files: [
